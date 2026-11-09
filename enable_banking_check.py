@@ -1,4 +1,5 @@
 """Local, read-only connection check for Enable Banking and Jæren Sparebank."""
+import argparse
 import base64
 from datetime import datetime, timedelta, timezone
 from getpass import getpass
@@ -16,7 +17,7 @@ from uuid import UUID
 import webbrowser
 
 API_HOST = "api.enablebanking.com"
-CALLBACK = "https://localhost:8080/callback"
+DEFAULT_CALLBACK_PORT = 8080
 KEY_DIRECTORY = Path.home() / ".config" / "enable-banking"
 
 
@@ -74,9 +75,9 @@ def api_request(path, token, payload=None):
         raise CheckError("Kunne ikke nå Enable Banking API. Kjør skriptet i vanlig Terminal på Macen.") from None
 
 
-def read_callback(address, state):
+def read_callback(address, state, callback_url):
     received = urlsplit(address.strip())
-    expected = urlsplit(CALLBACK)
+    expected = urlsplit(callback_url)
     if received._replace(query="") != expected:
         raise CheckError("Returadressen samsvarer ikke med den registrerte localhost-adressen.")
     params = parse_qs(received.query)
@@ -106,6 +107,14 @@ def choose_account(accounts):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--callback-port", type=int, default=DEFAULT_CALLBACK_PORT,
+                        help="Porten i returadressen registrert hos Enable Banking (standard: 8080).")
+    port = parser.parse_args().callback_port
+    if not 1 <= port <= 65535:
+        parser.error("--callback-port må være mellom 1 og 65535.")
+    callback_url = f"https://localhost:{port}/callback"
+
     if not sys.stdin.isatty():
         raise CheckError("Kjør skriptet interaktivt i Terminal på Macen.")
     keys = sorted(KEY_DIRECTORY.glob("*.pem"))
@@ -129,12 +138,15 @@ def main():
 
     # The browser retains the localhost URL for manual copy. Avoid sending it to an existing listener.
     try:
-        connection = socket.create_connection(("localhost", 8080), timeout=0.5)
+        connection = socket.create_connection(("localhost", port), timeout=0.5)
     except OSError:
         pass
     else:
         connection.close()
-        raise CheckError("Port 8080 er allerede i bruk. Stopp den lokale tjenesten før testen.")
+        raise CheckError(
+            f"Port {port} er allerede i bruk. Registrer en ledig returport hos Enable Banking "
+            "og kjør på nytt med --callback-port PORT."
+        )
 
     state = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
@@ -142,7 +154,7 @@ def main():
         "access": {"valid_until": (now + timedelta(hours=1)).isoformat(timespec="seconds")},
         "aspsp": {"name": bank["name"], "country": "NO"},
         "state": state,
-        "redirect_url": CALLBACK,
+        "redirect_url": callback_url,
         "psu_type": "personal",
     })
     auth_url = authorization["url"]
@@ -157,7 +169,7 @@ def main():
     print("kopier hele adressen fra adressefeltet, selv om siden ikke åpner seg.")
     if not webbrowser.open(auth_url):
         print("Åpne denne innloggingslenken i nettleseren:", auth_url)
-    code = read_callback(getpass("Lim returadressen inn her i Terminal: "), state)
+    code = read_callback(getpass("Lim returadressen inn her i Terminal: "), state, callback_url)
     session = call("/sessions", {"code": code})
     account_id = str(UUID(choose_account(session["accounts"])["uid"]))
     account_path = f"/accounts/{account_id}"
